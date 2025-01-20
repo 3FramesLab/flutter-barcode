@@ -13,18 +13,20 @@ import android.os.Looper
 import android.util.Size
 import android.view.Surface
 import android.view.WindowManager
+import androidx.annotation.VisibleForTesting
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
-import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.TorchState
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -36,12 +38,12 @@ import io.flutter.view.TextureRegistry
 import java.io.ByteArrayOutputStream
 import kotlin.math.roundToInt
 
-
 class MobileScanner(
     private val activity: Activity,
     private val textureRegistry: TextureRegistry,
     private val mobileScannerCallback: MobileScannerCallback,
-    private val mobileScannerErrorCallback: MobileScannerErrorCallback
+    private val mobileScannerErrorCallback: MobileScannerErrorCallback,
+    private val barcodeScannerFactory: (options: BarcodeScannerOptions?) -> BarcodeScanner = ::defaultBarcodeScannerFactory,
 ) {
 
     /// Internal variables
@@ -49,7 +51,7 @@ class MobileScanner(
     private var camera: Camera? = null
     private var preview: Preview? = null
     private var textureEntry: TextureRegistry.SurfaceTextureEntry? = null
-    private var scanner = BarcodeScanning.getClient()
+    private var scanner: BarcodeScanner? = null
     private var lastScanned: List<String?>? = null
     private var scannerTimeout = false
     private var displayListener: DisplayManager.DisplayListener? = null
@@ -59,6 +61,15 @@ class MobileScanner(
     private var detectionSpeed: DetectionSpeed = DetectionSpeed.NO_DUPLICATES
     private var detectionTimeout: Long = 250
     private var returnImage = false
+
+    companion object {
+        /**
+         * Create a barcode scanner from the given options.
+         */
+        fun defaultBarcodeScannerFactory(options: BarcodeScannerOptions?) : BarcodeScanner {
+            return if (options == null) BarcodeScanning.getClient() else BarcodeScanning.getClient(options)
+        }
+    }
 
     /**
      * callback for the camera. Every frame is passed through this function.
@@ -75,76 +86,74 @@ class MobileScanner(
             scannerTimeout = true
         }
 
-        scanner.process(inputImage)
-            .addOnSuccessListener { barcodes ->
+        scanner?.let {
+            it.process(inputImage).addOnSuccessListener { barcodes ->
                 if (detectionSpeed == DetectionSpeed.NO_DUPLICATES) {
-                    val newScannedBarcodes = barcodes.mapNotNull({ barcode -> barcode.rawValue }).sorted()
+                    val newScannedBarcodes = barcodes.mapNotNull {
+                        barcode -> barcode.rawValue
+                    }.sorted()
+
                     if (newScannedBarcodes == lastScanned) {
                         // New scanned is duplicate, returning
                         return@addOnSuccessListener
                     }
-                    if (newScannedBarcodes.isNotEmpty()) lastScanned = newScannedBarcodes
+                    if (newScannedBarcodes.isNotEmpty()) {
+                        lastScanned = newScannedBarcodes
+                    }
                 }
 
                 val barcodeMap: MutableList<Map<String, Any?>> = mutableListOf()
 
                 for (barcode in barcodes) {
-                    if (scanWindow != null) {
-                        val match = isBarcodeInScanWindow(scanWindow!!, barcode, imageProxy)
-                        if (!match) {
-                            continue
-                        } else {
-                            barcodeMap.add(barcode.data)
-                        }
-                    } else {
+                    if (scanWindow == null) {
+                        barcodeMap.add(barcode.data)
+                        continue
+                    }
+
+                    if (isBarcodeInScanWindow(scanWindow!!, barcode, imageProxy)) {
                         barcodeMap.add(barcode.data)
                     }
                 }
 
-
-                if (barcodeMap.isNotEmpty()) {
-                    if (returnImage) {
-
-                        val bitmap = Bitmap.createBitmap(mediaImage.width, mediaImage.height, Bitmap.Config.ARGB_8888)
-
-                        val imageFormat = YuvToRgbConverter(activity.applicationContext)
-
-                        imageFormat.yuvToRgb(mediaImage, bitmap)
-
-                        val bmResult = rotateBitmap(bitmap, camera?.cameraInfo?.sensorRotationDegrees?.toFloat() ?: 90f)
-
-                        val stream = ByteArrayOutputStream()
-                        bmResult.compress(Bitmap.CompressFormat.PNG, 100, stream)
-                        val byteArray = stream.toByteArray()
-                        val bmWidth = bmResult.width
-                        val bmHeight = bmResult.height
-                        bmResult.recycle()
-
-
-                        mobileScannerCallback(
-                            barcodeMap,
-                            byteArray,
-                            bmWidth,
-                            bmHeight
-                        )
-
-                    } else {
-
-                        mobileScannerCallback(
-                            barcodeMap,
-                            null,
-                            null,
-                            null
-                        )
-                    }
+                if (barcodeMap.isEmpty()) {
+                    return@addOnSuccessListener
                 }
-            }
-            .addOnFailureListener { e ->
+
+                if (!returnImage) {
+                    mobileScannerCallback(
+                        barcodeMap,
+                        null,
+                        mediaImage.width,
+                        mediaImage.height)
+                    return@addOnSuccessListener
+                }
+
+                val bitmap = Bitmap.createBitmap(mediaImage.width, mediaImage.height, Bitmap.Config.ARGB_8888)
+                val imageFormat = YuvToRgbConverter(activity.applicationContext)
+
+                imageFormat.yuvToRgb(mediaImage, bitmap)
+
+                val bmResult = rotateBitmap(bitmap, camera?.cameraInfo?.sensorRotationDegrees?.toFloat() ?: 90f)
+
+                val stream = ByteArrayOutputStream()
+                bmResult.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                val byteArray = stream.toByteArray()
+                val bmWidth = bmResult.width
+                val bmHeight = bmResult.height
+                bmResult.recycle()
+
+                mobileScannerCallback(
+                    barcodeMap,
+                    byteArray,
+                    bmWidth,
+                    bmHeight
+                )
+            }.addOnFailureListener { e ->
                 mobileScannerErrorCallback(
                     e.localizedMessage ?: e.toString()
                 )
-            }
-            .addOnCompleteListener { imageProxy.close() }
+            }.addOnCompleteListener { imageProxy.close() }
+        }
 
         if (detectionSpeed == DetectionSpeed.NORMAL) {
             // Set timer and continue
@@ -160,26 +169,35 @@ class MobileScanner(
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
-
-    // scales the scanWindow to the provided inputImage and checks if that scaled
-    // scanWindow contains the barcode
-    private fun isBarcodeInScanWindow(
+    // Scales the scanWindow to the provided inputImage and checks if that scaled
+    // scanWindow contains the barcode.
+    @VisibleForTesting
+    fun isBarcodeInScanWindow(
         scanWindow: List<Float>,
         barcode: Barcode,
         inputImage: ImageProxy
     ): Boolean {
+        // TODO: use `cornerPoints` instead, since the bounding box is not bound to the coordinate system of the input image
+        // On iOS we do this correctly, so the calculation should match that.
         val barcodeBoundingBox = barcode.boundingBox ?: return false
 
-        val imageWidth = inputImage.height
-        val imageHeight = inputImage.width
+        try {
+            val imageWidth = inputImage.height
+            val imageHeight = inputImage.width
 
-        val left = (scanWindow[0] * imageWidth).roundToInt()
-        val top = (scanWindow[1] * imageHeight).roundToInt()
-        val right = (scanWindow[2] * imageWidth).roundToInt()
-        val bottom = (scanWindow[3] * imageHeight).roundToInt()
+            val left = (scanWindow[0] * imageWidth).roundToInt()
+            val top = (scanWindow[1] * imageHeight).roundToInt()
+            val right = (scanWindow[2] * imageWidth).roundToInt()
+            val bottom = (scanWindow[3] * imageHeight).roundToInt()
 
-        val scaledScanWindow = Rect(left, top, right, bottom)
-        return scaledScanWindow.contains(barcodeBoundingBox)
+            val scaledScanWindow = Rect(left, top, right, bottom)
+
+            return scaledScanWindow.contains(barcodeBoundingBox)
+        } catch (exception: IllegalArgumentException) {
+            // Rounding of the scan window dimensions can fail, due to encountering NaN.
+            // If we get NaN, rather than give a false positive, just return false.
+            return false
+        }
     }
 
     // Return the best resolution for the actual device orientation.
@@ -239,11 +257,7 @@ class MobileScanner(
         }
 
         lastScanned = null
-        scanner = if (barcodeScannerOptions != null) {
-            BarcodeScanning.getClient(barcodeScannerOptions)
-        } else {
-            BarcodeScanning.getClient()
-        }
+        scanner = barcodeScannerFactory(barcodeScannerOptions)
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(activity)
         val executor = ContextCompat.getMainExecutor(activity)
@@ -368,11 +382,22 @@ class MobileScanner(
             val height = resolution.height.toDouble()
             val portrait = (camera?.cameraInfo?.sensorRotationDegrees ?: 0) % 180 == 0
 
+            // Start with 'unavailable' torch state.
+            var currentTorchState: Int = -1
+
+            camera?.cameraInfo?.let {
+                if (!it.hasFlashUnit()) {
+                    return@let
+                }
+
+                currentTorchState = it.torchState.value ?: -1
+            }
+
             mobileScannerStartedCallback(
                 MobileScannerStartParameters(
                     if (portrait) width else height,
                     if (portrait) height else width,
-                    camera?.cameraInfo?.hasFlashUnit() ?: false,
+                    currentTorchState,
                     textureEntry!!.id(),
                     numberOfCameras ?: 0
                 )
@@ -396,14 +421,27 @@ class MobileScanner(
         }
 
         val owner = activity as LifecycleOwner
-        camera?.cameraInfo?.torchState?.removeObservers(owner)
+        // Release the camera observers first.
+        camera?.cameraInfo?.let {
+            it.torchState.removeObservers(owner)
+            it.zoomState.removeObservers(owner)
+            it.cameraState.removeObservers(owner)
+        }
+        // Unbind the camera use cases, the preview is a use case.
+        // The camera will be closed when the last use case is unbound.
         cameraProvider?.unbindAll()
-        textureEntry?.release()
-
+        cameraProvider = null
         camera = null
         preview = null
+
+        // Release the texture for the preview.
+        textureEntry?.release()
         textureEntry = null
-        cameraProvider = null
+
+        // Release the scanner.
+        scanner?.close()
+        scanner = null
+        lastScanned = null
     }
 
     fun stopScanning() {
@@ -438,37 +476,45 @@ class MobileScanner(
     /**
      * Toggles the flash light on or off.
      */
-    fun toggleTorch(enableTorch: Boolean) {
-        if (camera == null) {
-            return
-        }
+    fun toggleTorch() {
+        camera?.let {
+            if (!it.cameraInfo.hasFlashUnit()) {
+                return@let
+            }
 
-        if (camera?.cameraInfo?.hasFlashUnit() == true) {
-            camera?.cameraControl?.enableTorch(enableTorch)
+            when(it.cameraInfo.torchState.value) {
+                TorchState.OFF -> it.cameraControl.enableTorch(true)
+                TorchState.ON -> it.cameraControl.enableTorch(false)
+            }
         }
     }
 
     /**
      * Analyze a single image.
      */
-    fun analyzeImage(image: Uri, analyzerCallback: AnalyzerCallback) {
+    fun analyzeImage(
+        image: Uri,
+        scannerOptions: BarcodeScannerOptions?,
+        onSuccess: AnalyzerSuccessCallback,
+        onError: AnalyzerErrorCallback) {
         val inputImage = InputImage.fromFilePath(activity, image)
 
-        scanner.process(inputImage)
-            .addOnSuccessListener { barcodes ->
-                val barcodeMap = barcodes.map { barcode -> barcode.data }
+        // Use a short lived scanner instance, which is closed when the analysis is done.
+        val barcodeScanner: BarcodeScanner = barcodeScannerFactory(scannerOptions)
 
-                if (barcodeMap.isNotEmpty()) {
-                    analyzerCallback(barcodeMap)
-                } else {
-                    analyzerCallback(null)
-                }
+        barcodeScanner.process(inputImage).addOnSuccessListener { barcodes ->
+            val barcodeMap = barcodes.map { barcode -> barcode.data }
+
+            if (barcodeMap.isEmpty()) {
+                onSuccess(null)
+            } else {
+                onSuccess(barcodeMap)
             }
-            .addOnFailureListener { e ->
-                mobileScannerErrorCallback(
-                    e.localizedMessage ?: e.toString()
-                )
-            }
+        }.addOnFailureListener { e ->
+            onError(e.localizedMessage ?: e.toString())
+        }.addOnCompleteListener {
+            barcodeScanner.close()
+        }
     }
 
     /**
@@ -488,4 +534,14 @@ class MobileScanner(
         camera?.cameraControl?.setZoomRatio(1f)
     }
 
+    /**
+     * Dispose of this scanner instance.
+     */
+    fun dispose() {
+        if (isStopped()) {
+            return
+        }
+
+        stop() // Defer to the stop method, which disposes all resources anyway.
+    }
 }
