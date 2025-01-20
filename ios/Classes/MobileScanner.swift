@@ -21,6 +21,7 @@ public class MobileScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     /// The selected camera
     var device: AVCaptureDevice!
+    var videoOutput: AVCaptureVideoDataOutput!
 
     /// The long lived barcode scanner for scanning barcodes from a camera preview.
     var scanner: BarcodeScanner? = nil
@@ -226,7 +227,7 @@ public class MobileScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
         captureSession!.sessionPreset = AVCaptureSession.Preset.photo
         // Add video output.
-        let videoOutput = AVCaptureVideoDataOutput()
+        videoOutput = AVCaptureVideoDataOutput()
 
         videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
         videoOutput.alwaysDiscardsLateVideoFrames = true
@@ -315,6 +316,15 @@ public class MobileScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         captureSession = nil
         device = nil
         scanner = nil
+        videoOutput = nil
+    }
+    
+    func stopScanning() {
+        videoOutput.setSampleBufferDelegate(nil, queue: nil)
+    }
+        
+    func resumeScanning() {
+        videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue.main)
     }
 
     /// Toggle the torch.

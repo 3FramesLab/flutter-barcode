@@ -107,6 +107,10 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin {
             start(call, result)
         case "stop":
             stop(result)
+        case "stopScanning":
+            stopScanning(result)
+        case "resumeScanning":
+            resumeScanning(result)
         case "toggleTorch":
             toggleTorch(result)
         case "analyzeImage":
@@ -171,6 +175,20 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin {
     private func stop(_ result: @escaping FlutterResult) {
         do {
             try mobileScanner.stop()
+        } catch {}
+        result(nil)
+    }
+    
+    private func stopScanning(_ result: @escaping FlutterResult) {
+        do {
+            try mobileScanner.stopScanning()
+        } catch {}
+        result(nil)
+    }
+    
+    private func resumeScanning(_ result: @escaping FlutterResult) {
+        do {
+            try mobileScanner.resumeScanning()
         } catch {}
         result(nil)
     }
